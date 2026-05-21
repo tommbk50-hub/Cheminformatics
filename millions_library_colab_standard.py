@@ -232,6 +232,7 @@ CORE_SMILES   = "O=C(O)[C@@H]1CNC[C@H]1c2cccc(F)c2"
 
 # NOTE: Standard Colab instances (~12GB RAM) cannot handle the full multi-billion
 # molecule dataset. Point this to a smaller sample file instead.
+# You must upload your sample .smi.gz file to /content before running this cell.
 BB_FILE       = "/content/sample_zinc_chunk.smi.gz"
 
 # Property Filters (Lipinski-ish)
@@ -894,7 +895,7 @@ finally:
     subprocess.run(f"rm -rf {ram_in}/* {ram_out}/* {tasks_file} {ticks_file} {merged_ram_file}", shell=True)  # /content paths
 
 #@title Download the results as a zip file
-!pigz -p 64 /home/tommbk50/enumerated_products_final.csv
+!pigz -p 2 "{final_csv}"
 
 # @title Cell 9: Gold Standard Lead-Like Filter (V16: Unbreakable & Smooth ETA)
 import os, glob, subprocess, duckdb, shutil, time, math
@@ -1007,9 +1008,9 @@ os.chmod("molecule_filter", 0o755)
 print("✅ C++ Filter Engine compiled successfully.")
 
 # --- 3. NVMe Block-Seeking & 1-to-1 Core Mapping ---
-ram_in = "/dev/shm/filter_in"
-ram_out = "/dev/shm/filter_out"
-ticks_file = "/dev/shm/filter_ticks.log"
+ram_in = "/content/filter_in"
+ram_out = "/content/filter_out"
+ticks_file = "/content/filter_ticks.log"
 
 subprocess.run(f"rm -rf {ram_in} {ram_out} {ticks_file}", shell=True)
 os.makedirs(ram_in, exist_ok=True)
@@ -1077,7 +1078,7 @@ with tqdm(total=total_lines, desc="Filtering", unit="mols", smoothing=0.1) as pb
 
 # --- 6. Unified RAM-Block Aggregation & DuckDB Overclocking ---
 print("\nΔ Re-merging surviving molecules into final Lead-Like CSV...")
-merged_ram_file = "/dev/shm/merged_filtered.csv"
+merged_ram_file = "/content/merged_filtered.csv"
 subprocess.run(f"cat {ram_out}/*.csv > {merged_ram_file} 2>/dev/null", shell=True)
 
 header = subprocess.check_output(f"head -n 1 '{input_csv}'", shell=True).decode('utf-8').strip()
