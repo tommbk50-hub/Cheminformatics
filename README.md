@@ -12,7 +12,7 @@
 
 <img src="assets/cheminformatics.gif" width="850" alt="Predictions demo">
 
-🖥️ **13 notebooks** &nbsp;·&nbsp; 🎥 **Video tutorial for every tool** &nbsp;·&nbsp; ⚡ **GPU-accelerated where it counts** &nbsp;·&nbsp; 🔬 **Covers drug discovery, libraries, reactions & analytics**
+🖥️ **14 notebooks** &nbsp;·&nbsp; 🎥 **Video tutorial for every tool** &nbsp;·&nbsp; ⚡ **GPU-accelerated where it counts** &nbsp;·&nbsp; 🔬 **Covers drug discovery, libraries, reactions & analytics**
 
 </div>
 
@@ -67,6 +67,7 @@ Click the Colab badge to open a notebook directly. `.zip` entries link to the fi
 | Notebook | Tool | What it does | Main input | Runtime | Colab Notebook | Tutorial | Relevant Issues |
 |---|---|---|---|---|---|---|---|
 | `HPLC-Py.ipynb` | HPLC-Py | Peak detection and quantification of HPLC chromatograms. | Chromatogram data | ✅ CPU | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tommbk50-hub/Cheminformatics/blob/main/HPLC-Py.ipynb) | [🎥 Video](https://www.youtube.com/watch?v=K8d2b8Ljny4&t=13s) | — |
+| `pyOpenMS.ipynb` | pyOpenMS | Untargeted/targeted metabolite analysis of LC-MS (HPLC-MS) data: loads mzML, plots the chromatogram, looks up target SMILES (RDKit/PubChem, Ketcher input), then runs an LC-MS1 extracted-ion-chromatogram (EIC) pipeline with retention-time alignment, peak detection and dominant-m/z confidence scoring. Uses `uv` for fast installs and `hplc-py` for deconvolution. | mzML file, target SMILES | ✅ CPU | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tommbk50-hub/Cheminformatics/blob/main/pyOpenMS.ipynb) | — | — |
 | `GCMS_simulator__colab (5).zip` | GC-MS simulator | Predicts a fragmentation tree and simulated GC-MS spectrum from a SMILES. Unzip to get the notebook. | SMILES | ✅ CPU | [📦 File](https://github.com/tommbk50-hub/Cheminformatics/blob/main/GCMS_simulator__colab%20%285%29.zip) | [🎥 Video](https://www.youtube.com/watch?v=rbkOwAOXoY8) | — |
 | `UVVis-ML.zip` | UV-Vis ML | Predicts molecular optical (UV-Vis) peaks with deep learning (Chem. Sci. 2022). Unzip to get `uvvisml (1).ipynb`. | SMILES | ✅ CPU | [📦 File](https://github.com/tommbk50-hub/Cheminformatics/blob/main/UVVis-ML.zip) | [🎥 Video](https://www.youtube.com/watch?v=-kaYCyI7woc) | — |
 | `Uni_pKa.ipynb` | Uni-pKa | pKa prediction. **Note: the file in the repo is currently empty.** | SMILES | — | [📦 File](https://github.com/tommbk50-hub/Cheminformatics/blob/main/Uni_pKa.ipynb) | [🎥 Video](https://www.youtube.com/watch?v=WcG1GpVonc8) | — |
