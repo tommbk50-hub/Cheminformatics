@@ -12,6 +12,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 
 NOTEBOOK = Path(__file__).resolve().parents[1] / "pyOpenMS.ipynb"
@@ -86,10 +87,12 @@ class OfflineChemistryTests(unittest.TestCase):
         self.assertIn("H2O", [x["loss"] for x in ns["annotate_neutral_losses"](ions)])
         ns["SPECTRAL_STATE"]["peaks"] = [{
             "rt_min": float(i), "ions": ions, "artifacts": ["TPPO"],
-            "neutral_losses": [], "candidates": [],
+            "neutral_losses": [], "candidates": [{"formula": "C2H6O",
+                                                   "cLogP": 0.1, "TPSA": 20}],
         } for i in range(6)]
         compact = ns["compact_peak_context"]()
         self.assertEqual(len(json.loads(compact)), 6)
+        self.assertEqual(json.loads(compact)[0]["r"], [[0.1, 20]])
         self.assertLess(len(compact), 950)
 
     def test_disk_cache_reuses_success_and_not_failures(self):
@@ -133,6 +136,36 @@ class OfflineChemistryTests(unittest.TestCase):
         self.assertEqual(ns["match_uv_apex_to_ms_scan"](1.00), 1.08)
         ns["SPECTRAL_STATE"]["scans"] = []
         self.assertIsNone(ns["match_uv_apex_to_ms_scan"](1.00))
+
+    def test_chat_prunes_tool_history_and_routes_complex_turns(self):
+        types = SimpleNamespace(**{
+            name: lambda **fields: SimpleNamespace(**fields)
+            for name in ("Content", "Part", "GenerateContentConfig",
+                         "ThinkingConfig", "AutomaticFunctionCallingConfig")
+        })
+        client = SimpleNamespace(chats=SimpleNamespace(create=Mock(return_value=object())))
+        selection = SimpleNamespace(value="gemini-2.5-flash")
+        ns = load_functions("init_chat_session", namespace={
+            "client": client, "types": types, "model_dropdown": selection,
+            "reaction_input": SimpleNamespace(value=""),
+            "uv_ms_delay_input": SimpleNamespace(value=.08),
+            "rdkit_tools": [], "build_system_instruction": lambda: "compact instruction",
+            "chat_history_ui": [("user", "u" * 800), ("model", "tool summary"),
+                                ("user", "question"), ("model", "answer"),
+                                ("user", "recent question")],
+        })
+        ns["SPECTRAL_STATE"].update(data_id=id(None), reaction_text="")
+        ns["init_chat_session"]()
+        kwargs = client.chats.create.call_args.kwargs
+        self.assertEqual(kwargs["model"], "gemini-2.5-flash")
+        self.assertEqual(len(kwargs["history"]), 4)
+        self.assertEqual(kwargs["history"][0].parts[0].text, "tool summary")
+        self.assertEqual(kwargs["config"].thinking_config.thinking_budget, 0)
+        self.assertEqual(kwargs["config"].automatic_function_calling.maximum_remote_calls, 6)
+        selection.value = "gemini-2.5-pro"
+        ns["init_chat_session"]()
+        self.assertEqual(client.chats.create.call_args.kwargs["config"].thinking_config.thinking_budget,
+                         1024)
 
 
 @unittest.skipUnless(all(importlib.util.find_spec(p) for p in
