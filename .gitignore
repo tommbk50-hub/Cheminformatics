@@ -1,0 +1,7 @@
+# Python / notebook artefacts
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Local LC-MS database lookup cache written by pyOpenMS.ipynb (Step 3)
+.lcms_chem_cache/
