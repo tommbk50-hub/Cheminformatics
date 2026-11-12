@@ -10,9 +10,10 @@ import threading
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 NOTEBOOK = Path(__file__).resolve().parents[1] / "pyOpenMS.ipynb"
@@ -55,6 +56,42 @@ class NotebookStructureTests(unittest.TestCase):
                                       "select_scan_rt", "overlay_formula_isotopes",
                                       "peak_annotations"])
         self.assertNotIn("raw_ms1_top_25", STEP3)
+
+    def test_submit_displays_raw_function_calls_after_output_refresh(self):
+        for calls in ([SimpleNamespace(name="get_peak_details")], None):
+            with self.subTest(calls=calls):
+                events = []
+                response = SimpleNamespace(
+                    candidates=[SimpleNamespace(content=SimpleNamespace(
+                        parts=[SimpleNamespace(text="final answer")]))],
+                    function_calls=calls)
+                chat_input = SimpleNamespace(value="Analyze peak", disabled=False)
+                submit_button = SimpleNamespace(disabled=False)
+                render = Mock()
+                ns = load_functions("on_submit_clicked", "extract_response_text", namespace={
+                    "chat_input": chat_input, "submit_button": submit_button,
+                    "chat_session": SimpleNamespace(send_message=Mock(return_value=response)),
+                    "init_chat_session": lambda: None, "output_area": nullcontext(),
+                    "chat_history_ui": [], "model_dropdown": SimpleNamespace(value="gemini"),
+                    "clear_output": lambda **_: events.append(("clear", None)),
+                    "display": Mock(), "Markdown": str, "HTML": str,
+                    "render_message_with_svgs": render,
+                })
+                with patch("builtins.print", side_effect=lambda *args: events.append(
+                        ("print", args[0]))):
+                    ns["on_submit_clicked"](None)
+                self.assertEqual(ns["chat_history_ui"],
+                                 [("user", "Analyze peak"), ("model", "final answer")])
+                render.assert_called_once_with("**🤖 Gemini [gemini]:**\n\nfinal answer")
+                self.assertEqual(chat_input.value, "")
+                self.assertFalse(chat_input.disabled)
+                self.assertFalse(submit_button.disabled)
+                debug = ("print", f"DEBUG raw function_calls: {calls}")
+                if calls:
+                    self.assertIn(debug, events)
+                    self.assertLess(events.index(("clear", None)), events.index(debug))
+                else:
+                    self.assertNotIn(debug, events)
 
 
 class OfflineChemistryTests(unittest.TestCase):
@@ -144,7 +181,7 @@ class OfflineChemistryTests(unittest.TestCase):
                          "ThinkingConfig", "AutomaticFunctionCallingConfig")
         })
         client = SimpleNamespace(chats=SimpleNamespace(create=Mock(return_value=object())))
-        selection = SimpleNamespace(value="gemini-2.5-flash")
+        selection = SimpleNamespace(value="gemini-3.8-flash")
         ns = load_functions("init_chat_session", namespace={
             "client": client, "types": types, "model_dropdown": selection,
             "reaction_input": SimpleNamespace(value=""),
@@ -157,12 +194,13 @@ class OfflineChemistryTests(unittest.TestCase):
         ns["SPECTRAL_STATE"].update(data_id=id(None), reaction_text="")
         ns["init_chat_session"]()
         kwargs = client.chats.create.call_args.kwargs
-        self.assertEqual(kwargs["model"], "gemini-2.5-flash")
+        self.assertEqual(kwargs["model"], "gemini-3.8-flash")
         self.assertEqual(len(kwargs["history"]), 4)
         self.assertEqual(kwargs["history"][0].parts[0].text, "tool summary")
         self.assertEqual(kwargs["config"].thinking_config.thinking_budget, 0)
+        self.assertFalse(kwargs["config"].automatic_function_calling.disable)
         self.assertEqual(kwargs["config"].automatic_function_calling.maximum_remote_calls, 6)
-        selection.value = "gemini-2.5-pro"
+        selection.value = "gemini-4-carbon"
         ns["init_chat_session"]()
         self.assertEqual(client.chats.create.call_args.kwargs["config"].thinking_config.thinking_budget,
                          1024)
