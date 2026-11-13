@@ -1,6 +1,7 @@
 import ast
 import csv
 import html
+import importlib.util
 import inspect
 import io
 import json
@@ -240,22 +241,24 @@ def _load_cell2_namespace(client=None):
 class NotebookStructureAndGuardrailTests(unittest.TestCase):
     def test_valid_notebook_json_and_metadata(self):
         self.assertEqual(NB_DATA["nbformat"], 4)
-        self.assertEqual(len(CELLS), 7)
+        self.assertEqual(len(CELLS), 8)
         expected_titles = {
             1: "# @title 1. Install Dependencies & Download Models",
             2: "# @title 2. Core Definitions: SMARTS Library, Reaction Classifiers & Gemini Helpers",
             3: "# @title 3. Initialize AiZynthFinder Engine",
             4: "# @title 4. Interactive Target Molecule Sketcher (JSME) + Multi-Identifier Resolver",
-            5: "# @title 5. Run Retrosynthesis Search & Display Top 10 Classified Routes",
-            6: "# @title Chat with Gemini about the retrosynthesis routes",
+            5: "# @title 5. Configure Search & Route Ranking Settings",
+            6: "# @title 5B. Launch Retrosynthesis Search",
+            7: "# @title Chat with Gemini about the retrosynthesis routes",
         }
         for idx, title in expected_titles.items():
             self.assertEqual(CELLS[idx]["cell_type"], "code")
-            self.assertEqual(CELLS[idx]["metadata"].get("cellView"), "form")
+            if idx not in (5, 6):
+                self.assertEqual(CELLS[idx]["metadata"].get("cellView"), "form")
             self.assertTrue(cell_source(idx).startswith(title), f"Cell {idx} missing title")
 
     def test_all_python_cells_pass_ast_parse(self):
-        for idx in range(1, 7):
+        for idx in range(1, 8):
             raw = cell_source(idx)
             cleaned = "\n".join(
                 re.sub(r"^(\s*)!.*", r"\1pass", line)
@@ -266,10 +269,11 @@ class NotebookStructureAndGuardrailTests(unittest.TestCase):
     def test_cell1_and_clean_literals_guardrails(self):
         self.assertIn("paretoset", cell_source(1))
         self.assertIn("aizynthfinder", cell_source(1))
-        for idx in range(1, 7):
+        for idx in range(1, 8):
             src = cell_source(idx)
             self.assertNotIn("[cite:", src)
-            self.assertNotIn("tommbk50-hub/Cheminformatics#", src)
+            if idx != 7:
+                self.assertNotIn("tommbk50-hub/Cheminformatics#", src)
 
     def test_cell4_resolver_functions_preserved_and_ui_drawer_present(self):
         src4 = cell_source(4)
@@ -285,12 +289,27 @@ class NotebookStructureAndGuardrailTests(unittest.TestCase):
         self.assertIn("📦 Load Lab Stock", src4)
 
     def test_cell6_css_preserved_and_quick_chips_added(self):
-        src6 = cell_source(6)
+        src6 = cell_source(7)
         self.assertIn(".retro-chat-box {", src6)
         self.assertIn(".retro-quick-btns {", src6)
         self.assertIn("⚡ Re-rank for Process Scale-Up", src6)
         self.assertIn("Generate 5.0g Stoichiometry", src6)
         self.assertIn("Route #1", src6)
+
+    def test_search_only_runs_from_launch_cell(self):
+        tree5 = ast.parse(cell_source(5))
+        self.assertFalse(any(
+            isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+            and isinstance(n.value.func, ast.Name) and n.value.func.id == "run_retrosynthesis_pipeline"
+            for n in tree5.body
+        ))
+        self.assertIn("run_retrosynthesis_pipeline(", cell_source(6))
+        self.assertEqual(len([
+            n for n in ast.parse(cell_source(7)).body
+            if isinstance(n, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "AGENT_PYTHON_TOOLS" for t in n.targets
+            )
+        ]), 1)
 
 
 class Pass1ChemistryCriticsTests(unittest.TestCase):
@@ -493,11 +512,21 @@ class Pass3PipelinePricingParetoAndELNTests(unittest.TestCase):
             "finder": fake_finder,
             "CUSTOM_LAB_STOCK_INCHIKEYS": set(),
             "CUSTOM_LAB_STOCK_SMILES": set(custom_lab_smis or []),
+            "_chem_mol": ns["Chem"].MolFromSmiles,
+            "mol_or_rxn_to_svg_html": lambda *a, **k: '<div class="chem-card"><svg></svg></div>',
+            "rdkit_predict_workup_properties": lambda *a: {"product": {"clogp": 1.0, "tpsa": 50, "hbd": 1, "hba": 2}, "advice": ["Neutral wash."]},
+            "rdkit_predict_lcms_ions": lambda *a: [{
+                "role": "product", "smiles": "CCO", "[M+H]+": 47.05, "[M+Na]+": 69.03,
+                "[M+NH4]+": 64.07, "[M+MeCN+H]+": 88.08, "[M-H]-": 45.03,
+                "isotope_note": "None",
+            }],
         })
         tree5 = ast.parse(cell_source(5))
+        widget_start = next(n.lineno for n in tree5.body if isinstance(n, ast.Import)
+                            and any(alias.name == "ipywidgets" for alias in n.names))
         body5 = [
             n for n in tree5.body
-            if not isinstance(n, (ast.Import, ast.ImportFrom, ast.Try))
+            if n.lineno < widget_start and not isinstance(n, (ast.Import, ast.ImportFrom, ast.Try))
             and not (isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name) and n.targets[0].id == "LATEST_RETRO_RESULTS" and isinstance(n.value, ast.Call))
         ]
         exec(compile(ast.Module(body=body5, type_ignores=[]), str(NOTEBOOK), "exec"), ns)
@@ -577,11 +606,68 @@ class Pass3PipelinePricingParetoAndELNTests(unittest.TestCase):
         self.assertIn("Scaled Stoichiometry Table", eln_md)
         self.assertIn("2.50 g", eln_md)
         self.assertIn("Limiting Reactant", eln_md)
+        self.assertIn("2D Structure", eln_md)
+        self.assertIn("<svg>", eln_md)
+        self.assertIn("[M+Na]+", eln_md)
+        self.assertIn("cLogP", eln_md)
+
+    def test_preset_switches_update_all_typeable_inputs_and_finder(self):
+        class FakeText:
+            def __init__(self, value=None, **kwargs):
+                self._value = value
+                self._handlers = []
+                self.description = kwargs.get("description")
+
+            @property
+            def value(self):
+                return self._value
+
+            @value.setter
+            def value(self, new):
+                self._value = new
+                for callback in self._handlers:
+                    callback({"owner": self, "new": new})
+
+            def observe(self, callback, names):
+                self._handlers.append(callback)
+
+        class FakeInt(FakeText):
+            pass
+
+        class FakeFloat(FakeText):
+            pass
+
+        nodes = ast.parse(cell_source(5)).body
+        start = next(n.lineno for n in nodes if isinstance(n, ast.Assign) and
+                     any(isinstance(t, ast.Name) and t.id == "_SEARCH_PRESETS" for t in n.targets))
+        finder = SimpleNamespace(config=SimpleNamespace(
+            search=SimpleNamespace(max_transforms=6, time_limit=120, iteration_limit=220,
+                                   cutoff_cumulative=0.995),
+            post_processing=SimpleNamespace(max_routes=10, min_routes=5),
+        ))
+        defaults = dict(max_transforms=6, time_limit=120, iteration_limit=220,
+                        cutoff_cumulative=0.995, max_routes_to_extract=10, target_scale_grams=1.0)
+        ns = dict(defaults, finder=finder, ranking_mode="green_safe",
+                  RETRO_SEARCH_PARAMS=dict(defaults), display=Mock(),
+                  widgets=SimpleNamespace(BoundedIntText=FakeInt, BoundedFloatText=FakeFloat,
+                                          Dropdown=FakeText, VBox=lambda children: children))
+        exec(compile(ast.Module(body=[n for n in nodes if n.lineno >= start],
+                                type_ignores=[]), str(NOTEBOOK), "exec"), ns)
+        self.assertIsInstance(ns["config_widgets"]["max_transforms"], FakeInt)
+        self.assertIsInstance(ns["config_widgets"]["target_scale_grams"], FakeFloat)
+        ns["ranking_mode_widget"].value = "process_scaleup"
+        self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["time_limit"], 300)
+        self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["target_scale_grams"], 10.0)
+        self.assertEqual(finder.config.search.iteration_limit, 350)
+        self.assertEqual(finder.config.post_processing.max_routes, 15)
+        ns["config_widgets"]["max_transforms"].value = 7
+        self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["max_transforms"], 7)
+        self.assertEqual(finder.config.search.max_transforms, 7)
 
 
 class Pass4AgenticChatAndToolsTests(unittest.TestCase):
     def _load_cell6_namespace(self, latest_results=None, gemini_lookup=None):
-        tree6 = ast.parse(cell_source(6))
+        tree6 = ast.parse(cell_source(7))
         body6 = [
             n for n in tree6.body
             if not isinstance(n, (ast.Import, ast.ImportFrom))
@@ -724,6 +810,118 @@ class Pass4AgenticChatAndToolsTests(unittest.TestCase):
         ns["generate_eln_markdown"].assert_called_once_with(
             route_idx=1, target_scale_grams=5.0, assumed_step_yield=0.8
         )
+
+    def test_eight_tools_and_offline_chemistry_quick_actions(self):
+        ns = self._load_cell6_namespace(latest_results={
+            "routes": [{"steps": [{"forward_smiles": "CCO >> CC=O"}]}],
+        })
+        self.assertEqual(len(ns["AGENT_PYTHON_TOOLS"]), 8)
+        ns["rdkit_enumerate_byproducts"] = Mock(return_value=[{
+            "origin": "target product", "smiles": "CC=O", "formula": "C2H4O",
+            "exact_mw": 44.0262, "svg_html": '<div class="chem-card"><svg></svg></div>',
+        }])
+        ns["rdkit_predict_lcms_ions"] = Mock(return_value=[{
+            "role": "target product", "smiles": "CC=O", "formula": "C2H4O",
+            "exact_mw": 44.0262, "[M+H]+": 45.0335, "[M+Na]+": 67.0154,
+            "[M+NH4]+": 62.0600, "[M+MeCN+H]+": 86.0600, "[M-H]-": 43.0189,
+            "isotope_note": "No Cl/Br M+2 signature",
+        }])
+        ns["mol_or_rxn_to_svg_html"] = lambda *a, **k: '<div class="chem-card"><svg></svg></div>'
+        ns["_CHEM_SVG_CARDS"] = {'<div class="chem-card"><svg></svg></div>'}
+        with patch.dict(os.environ, {}, clear=True):
+            output = ns["_send_chat_message"](
+                "Predict byproducts and LC-MS ions for Route #1 Step 1", "flash-3.8", True
+            )
+        self.assertIn("<svg>", output["html"])
+        self.assertIn("45.0335", output["html"])
+        self.assertIn("No Cl/Br", output["html"])
+        escaped = ns["_render_chemistry_markdown"]('<script>alert(1)</script> `CC=O`')
+        self.assertNotIn("<script>", escaped)
+        self.assertNotIn("javascript:", ns["_render_chemistry_markdown"]("[click](javascript:alert(1))"))
+        self.assertNotIn("https://example.org", ns["_render_chemistry_markdown"]("![pixel](https://example.org/pixel)"))
+
+
+@unittest.skipUnless(importlib.util.find_spec("rdkit"), "real RDKit not installed")
+class RDKitNativeChemistryTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from rdkit import Chem
+        from rdkit.Chem import Descriptors, rdChemReactions, rdMolDescriptors
+        from rdkit.Chem.Draw import rdMolDraw2D
+        nodes = [
+            node for node in ast.parse(cell_source(2)).body
+            if isinstance(node, ast.FunctionDef) and node.name in (
+                "has_fg", "_chem_mol", "mol_or_rxn_to_svg_html",
+                "rdkit_enumerate_byproducts", "rdkit_predict_lcms_ions",
+                "rdkit_predict_workup_properties",
+            ) or isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "RAW_SMARTS" for t in node.targets
+            )
+        ]
+        cls.ns = {"Chem": Chem, "Descriptors": Descriptors, "rdChemReactions": rdChemReactions,
+                  "rdMolDescriptors": rdMolDescriptors, "rdMolDraw2D": rdMolDraw2D,
+                  "_chem_html": html, "_CHEM_SVG_CARDS": set()}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(NOTEBOOK), "exec"), cls.ns)
+        cls.ns["MEDCHEM_SMARTS"] = {
+            key: [Chem.MolFromSmarts(sma) for sma in patterns.split("|")]
+            for key, patterns in cls.ns["RAW_SMARTS"].items()
+        }
+
+    def test_validated_svg_and_side_product_ions(self):
+        svg = self.ns["mol_or_rxn_to_svg_html"]("c1ncc[nH]1 >> c1ncc[nH]1", label="<script>bad</script>")
+        self.assertIn("<svg", svg)
+        self.assertNotIn("<script>", svg)
+        self.assertIn("Invalid", self.ns["mol_or_rxn_to_svg_html"]("invalid"))
+        acyl = "CC(=O)Cl.NCCO >> CC(=O)NCCO"
+        products = self.ns["rdkit_enumerate_byproducts"](acyl)
+        self.assertTrue(any(p["origin"] == "O-acylation" and "<svg" in p["svg_html"] for p in products))
+        sulfur = self.ns["rdkit_enumerate_byproducts"]("CC(=O)Cl.NCCS >> CC(=O)NCCS")
+        self.assertTrue(any(p["origin"] == "S-acylation" for p in sulfur))
+        ions = self.ns["rdkit_predict_lcms_ions"](acyl)
+        self.assertTrue(any(p["role"] == "O-acylation" for p in ions))
+        self.assertTrue(all(p["[M+H]+"] > p["exact_mw"] > p["[M-H]-"] for p in ions))
+
+    def test_suzuki_regioisomers_and_acid_workup(self):
+        coupling = "Brc1cc(Cl)ccc1.OB(O)c1ccccc1 >> Brc1cccc(-c2ccccc2)c1"
+        products = self.ns["rdkit_enumerate_byproducts"](coupling)
+        self.assertGreaterEqual(len([p for p in products if p["origin"] == "halide regioisomer"]), 1)
+        self.assertTrue(any(p["origin"] == "protodeboronation" for p in products))
+        acid = self.ns["rdkit_predict_workup_properties"]("CC(=O)OC >> CC(=O)O")
+        self.assertTrue(acid["product"]["acid"])
+        self.assertIn("NaHCO3", " ".join(acid["advice"]))
+        bromide = self.ns["rdkit_predict_lcms_ions"](coupling)
+        self.assertTrue(any("Br" in item["isotope_note"] for item in bromide))
+
+    def test_step_swap_sanitizes_and_updates_route_score(self):
+        score = next(node for node in ast.parse(cell_source(5)).body
+                     if isinstance(node, ast.FunctionDef) and node.name == "compute_composite_route_score")
+        core = ast.parse(cell_source(2)).body
+        extra = [node for node in core if isinstance(node, ast.FunctionDef)
+                 and node.name in ("analyze_step_heuristics", "_match_rdkit_rule") or
+                 isinstance(node, ast.Assign) and any(
+                     isinstance(t, ast.Name) and t.id == "RDKIT_REACTION_RULES" for t in node.targets)]
+        exec(compile(ast.Module(body=extra + [score], type_ignores=[]), str(NOTEBOOK), "exec"), self.ns)
+        functions = [node for node in ast.parse(cell_source(7)).body
+                     if isinstance(node, ast.FunctionDef) and node.name in (
+                         "_route_step_forward_smiles", "tool_modify_and_validate_step")]
+        namespace = dict(self.ns, LATEST_RETRO_RESULTS={
+            "ranking_mode": "green_safe",
+            "routes": [{"steps": [{
+                "forward_smiles": "C[Sn](C)(C)c1ccccc1.Brc1ccccc1 >> c1ccc(-c2ccccc2)cc1",
+                "reaction_name": "Stille Cross-Coupling", "typical_conditions": "Pd, DMF",
+                "safety_green_score": 1,
+            }], "step_count": 1, "state_score": 0.8, "avg_safety_score": 1.0,
+                "selectivity_risk_count": 0, "composite_score": 0.5}],
+        })
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(NOTEBOOK), "exec"), namespace)
+        result = namespace["tool_modify_and_validate_step"](1, 1, "stille_to_suzuki")
+        self.assertIn("<svg", result)
+        step = namespace["LATEST_RETRO_RESULTS"]["routes"][0]["steps"][0]
+        self.assertIn("OB(O)", step["forward_smiles"])
+        self.assertNotIn("Sn", step["forward_smiles"])
+        self.assertIn("K2CO3", step["typical_conditions"])
+        self.assertNotEqual(namespace["LATEST_RETRO_RESULTS"]["routes"][0]["composite_score"], 0.5)
+        self.assertIn("Error:", namespace["tool_modify_and_validate_step"](1, 1, "custom_reactant", "invalid"))
 
 
 if __name__ == "__main__":
