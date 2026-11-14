@@ -540,7 +540,10 @@ class Pass3PipelinePricingParetoAndELNTests(unittest.TestCase):
             CustomFrozenSmarts=None,
             custom_lab_stock_inchikeys=set(),
             custom_lab_stock_smiles=set(custom_lab_smis or []),
-            config=SimpleNamespace(search=SimpleNamespace(max_transforms=6, time_limit=120)),
+            config=SimpleNamespace(
+                search=SimpleNamespace(max_transforms=6, time_limit=120),
+                post_processing=SimpleNamespace(max_routes=10, min_routes=5),
+            ),
             stock=SimpleNamespace(_items={}),
             prepare_tree=Mock(),
             tree_search=Mock(),
@@ -661,6 +664,13 @@ class Pass3PipelinePricingParetoAndELNTests(unittest.TestCase):
         self.assertIn("[M+Na]+", eln_md)
         self.assertIn("cLogP", eln_md)
 
+        ns["RETRO_SEARCH_PARAMS"]["max_routes_to_extract"] = 1
+        res_capped = ns["run_retrosynthesis_pipeline"](
+            ranking_mode="balanced", use_gemini=False, render_output=False
+        )
+        self.assertEqual(len(res_capped["routes"]), 1)
+        self.assertEqual(ns["finder"].config.post_processing.max_routes, 1)
+
     def test_preset_switches_update_all_typeable_inputs_and_finder(self):
         class FakeText:
             def __init__(self, value=None, **kwargs):
@@ -693,8 +703,7 @@ class Pass3PipelinePricingParetoAndELNTests(unittest.TestCase):
         model = SimpleNamespace(beam_size=10)
         model_instance = SimpleNamespace(model=model, smi2tuple_of_preclist_and_probs={"CCO": "cached"})
         strategy = SimpleNamespace(model=SimpleNamespace(model=SimpleNamespace(model_instance=model_instance)))
-        finder = SimpleNamespace(expansion_policy=SimpleNamespace(selection=["transformer"],
-                                      __getitem__=None), config=SimpleNamespace(
+        finder = SimpleNamespace(config=SimpleNamespace(
             search=SimpleNamespace(max_transforms=6, time_limit=120, iteration_limit=220,
                                    cutoff_cumulative=0.995, return_first=True),
             post_processing=SimpleNamespace(max_routes=10, min_routes=5),
@@ -716,7 +725,7 @@ class Pass3PipelinePricingParetoAndELNTests(unittest.TestCase):
         self.assertIsInstance(ns["config_widgets"]["max_transforms"], FakeInt)
         self.assertIsInstance(ns["config_widgets"]["target_scale_grams"], FakeFloat)
         ns["ranking_mode_widget"].value = "process_scaleup"
-        self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["time_limit"], 300)
+        self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["time_limit"], 180)
         self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["beam_size"], 50)
         self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["target_scale_grams"], 10.0)
         self.assertEqual(finder.config.search.iteration_limit, 200)
