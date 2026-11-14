@@ -239,6 +239,23 @@ def _load_cell2_namespace(client=None):
 
 
 class NotebookStructureAndGuardrailTests(unittest.TestCase):
+    def test_speculative_beam_search_implementation_guidance(self):
+        self.assertEqual(CELLS[0]["cell_type"], "markdown")
+        overview = cell_source(0)
+        for expected in (
+            "## Exploring speculative beam search",
+            "### Implementation Approach",
+            "https://doi.org/10.1039/d5dd00573f",
+            "https://github.com/Academich/faster-ml-casp/blob/main/configs/medusa_default_config.yml",
+            'finder.expansion_policy.select("transformer")',
+            "sampling: medusa",
+            "time_limit",
+            "iteration_limit",
+            "not guaranteed gains",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, overview)
+
     def test_valid_notebook_json_and_metadata(self):
         self.assertEqual(NB_DATA["nbformat"], 4)
         self.assertEqual(len(CELLS), 8)
