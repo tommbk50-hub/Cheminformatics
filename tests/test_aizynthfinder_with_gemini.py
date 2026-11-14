@@ -252,6 +252,8 @@ class NotebookStructureAndGuardrailTests(unittest.TestCase):
             "time_limit",
             "iteration_limit",
             "not guaranteed gains",
+            "Runtime > Change runtime type",
+            "T4 GPU",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, overview)
@@ -260,7 +262,7 @@ class NotebookStructureAndGuardrailTests(unittest.TestCase):
         self.assertEqual(NB_DATA["nbformat"], 4)
         self.assertEqual(len(CELLS), 8)
         expected_titles = {
-            1: "# @title 1. Install Dependencies & Download Models",
+            1: "# @title 1. Install Dependencies & Download Medusa + Stock Models",
             2: "# @title 2. Core Definitions: SMARTS Library, Reaction Classifiers & Gemini Helpers",
             3: "# @title 3. Initialize AiZynthFinder Engine",
             4: "# @title 4. Interactive Target Molecule Sketcher (JSME) + Multi-Identifier Resolver",
@@ -286,11 +288,39 @@ class NotebookStructureAndGuardrailTests(unittest.TestCase):
     def test_cell1_and_clean_literals_guardrails(self):
         self.assertIn("paretoset", cell_source(1))
         self.assertIn("aizynthfinder", cell_source(1))
+        self.assertIn("faster-ml-casp", cell_source(1))
+        self.assertIn("data/bb_stock/zinc_stock.hdf5", cell_source(1))
+        self.assertIn("vocab_trained_on_USPTO_50K_PtoR_aug20.json", cell_source(1))
         for idx in range(1, 8):
             src = cell_source(idx)
             self.assertNotIn("[cite:", src)
             if idx != 7:
                 self.assertNotIn("tommbk50-hub/Cheminformatics#", src)
+
+    def test_medusa_retrostar_initialization_without_template_filter(self):
+        source = cell_source(3)
+        tree = ast.parse(source)
+        init = tree.body[-1]
+        self.assertIsInstance(init, ast.If)
+        stock = SimpleNamespace(items={"zinc": object()}, select=Mock())
+        expansion = SimpleNamespace(items={"transformer": object()}, select=Mock())
+        filter_policy = SimpleNamespace(selection=[], select=Mock())
+        finder = SimpleNamespace(
+            stock=stock, expansion_policy=expansion, filter_policy=filter_policy,
+            config=SimpleNamespace(search=SimpleNamespace(), post_processing=SimpleNamespace()),
+        )
+        factory = Mock(return_value=finder)
+        ns = {"AiZynthFinder": factory, "os": os}
+        with redirect_stdout(io.StringIO()):
+            exec(compile(ast.Module(body=[init], type_ignores=[]), str(NOTEBOOK), "exec"), ns)
+        factory.assert_called_once_with(configfile="faster-ml-casp/configs/medusa_default_config.yml")
+        stock.select.assert_called_once_with("zinc")
+        expansion.select.assert_called_once_with("transformer")
+        filter_policy.select.assert_not_called()
+        self.assertEqual(finder.config.search.algorithm, "aizynthfinder.search.retrostar.search_tree.SearchTree")
+        self.assertTrue(finder.config.search.return_first)
+        self.assertEqual(finder.config.post_processing.min_routes, 1)
+        self.assertEqual(finder.config.post_processing.max_routes, 10)
 
     def test_cell4_resolver_functions_preserved_and_ui_drawer_present(self):
         src4 = cell_source(4)
@@ -510,7 +540,10 @@ class Pass3PipelinePricingParetoAndELNTests(unittest.TestCase):
             CustomFrozenSmarts=None,
             custom_lab_stock_inchikeys=set(),
             custom_lab_stock_smiles=set(custom_lab_smis or []),
-            config=SimpleNamespace(search=SimpleNamespace(max_transforms=6, time_limit=120)),
+            config=SimpleNamespace(
+                search=SimpleNamespace(max_transforms=6, time_limit=120),
+                post_processing=SimpleNamespace(max_routes=10, min_routes=5),
+            ),
             stock=SimpleNamespace(_items={}),
             prepare_tree=Mock(),
             tree_search=Mock(),
@@ -597,6 +630,9 @@ class Pass3PipelinePricingParetoAndELNTests(unittest.TestCase):
         res_fast = ns["run_retrosynthesis_pipeline"](
             ranking_mode="medchem_fast", target_scale_grams=2.5, use_gemini=False, render_output=False
         )
+        self.assertEqual(ns["finder"].config.search.iteration_limit, 200)
+        self.assertTrue(ns["finder"].config.search.return_first)
+        self.assertEqual(ns["finder"].config.post_processing.min_routes, 1)
         self.assertEqual(len(res_fast["routes"]), 2)
         self.assertEqual(res_fast["routes"][0]["step_count"], 1)
         self.assertTrue(any(r["is_pareto_optimal"] for r in res_fast["routes"]))
@@ -628,6 +664,13 @@ class Pass3PipelinePricingParetoAndELNTests(unittest.TestCase):
         self.assertIn("[M+Na]+", eln_md)
         self.assertIn("cLogP", eln_md)
 
+        ns["RETRO_SEARCH_PARAMS"]["max_routes_to_extract"] = 1
+        res_capped = ns["run_retrosynthesis_pipeline"](
+            ranking_mode="balanced", use_gemini=False, render_output=False
+        )
+        self.assertEqual(len(res_capped["routes"]), 1)
+        self.assertEqual(ns["finder"].config.post_processing.max_routes, 1)
+
     def test_preset_switches_update_all_typeable_inputs_and_finder(self):
         class FakeText:
             def __init__(self, value=None, **kwargs):
@@ -657,13 +700,22 @@ class Pass3PipelinePricingParetoAndELNTests(unittest.TestCase):
         nodes = ast.parse(cell_source(5)).body
         start = next(n.lineno for n in nodes if isinstance(n, ast.Assign) and
                      any(isinstance(t, ast.Name) and t.id == "_SEARCH_PRESETS" for t in n.targets))
+        model = SimpleNamespace(beam_size=10)
+        model_instance = SimpleNamespace(model=model, smi2tuple_of_preclist_and_probs={"CCO": "cached"})
+        strategy = SimpleNamespace(model=SimpleNamespace(model=SimpleNamespace(model_instance=model_instance)))
         finder = SimpleNamespace(config=SimpleNamespace(
             search=SimpleNamespace(max_transforms=6, time_limit=120, iteration_limit=220,
-                                   cutoff_cumulative=0.995),
+                                   cutoff_cumulative=0.995, return_first=True),
             post_processing=SimpleNamespace(max_routes=10, min_routes=5),
         ))
+        class FakePolicies:
+            selection = ["transformer"]
+            def __getitem__(self, key):
+                return strategy
+        finder.expansion_policy = FakePolicies()
         defaults = dict(max_transforms=6, time_limit=120, iteration_limit=220,
-                        cutoff_cumulative=0.995, max_routes_to_extract=10, target_scale_grams=1.0)
+                        cutoff_cumulative=0.995, max_routes_to_extract=10, target_scale_grams=1.0,
+                        beam_size=10)
         ns = dict(defaults, finder=finder, ranking_mode="green_safe",
                   RETRO_SEARCH_PARAMS=dict(defaults), display=Mock(),
                   widgets=SimpleNamespace(BoundedIntText=FakeInt, BoundedFloatText=FakeFloat,
@@ -673,13 +725,20 @@ class Pass3PipelinePricingParetoAndELNTests(unittest.TestCase):
         self.assertIsInstance(ns["config_widgets"]["max_transforms"], FakeInt)
         self.assertIsInstance(ns["config_widgets"]["target_scale_grams"], FakeFloat)
         ns["ranking_mode_widget"].value = "process_scaleup"
-        self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["time_limit"], 300)
+        self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["time_limit"], 180)
+        self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["beam_size"], 50)
         self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["target_scale_grams"], 10.0)
-        self.assertEqual(finder.config.search.iteration_limit, 350)
-        self.assertEqual(finder.config.post_processing.max_routes, 15)
+        self.assertEqual(finder.config.search.iteration_limit, 200)
+        self.assertEqual(finder.config.post_processing.max_routes, 10)
+        self.assertEqual(finder.config.post_processing.min_routes, 1)
+        self.assertEqual(model.beam_size, 50)
+        self.assertEqual(model_instance.smi2tuple_of_preclist_and_probs, {})
+        self.assertTrue(finder.config.search.return_first)
         ns["config_widgets"]["max_transforms"].value = 7
         self.assertEqual(ns["RETRO_SEARCH_PARAMS"]["max_transforms"], 7)
         self.assertEqual(finder.config.search.max_transforms, 7)
+        ns["config_widgets"]["beam_size"].value = 10
+        self.assertEqual(model.beam_size, 10)
 
 
 class Pass4AgenticChatAndToolsTests(unittest.TestCase):
