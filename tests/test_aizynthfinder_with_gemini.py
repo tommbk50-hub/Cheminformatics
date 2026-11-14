@@ -243,15 +243,13 @@ class NotebookStructureAndGuardrailTests(unittest.TestCase):
         self.assertEqual(CELLS[0]["cell_type"], "markdown")
         overview = cell_source(0)
         for expected in (
-            "## Exploring speculative beam search",
-            "### Implementation Approach",
+            "## AI-assisted retrosynthesis and experiment planning",
+            "### What each stage does for a chemist",
             "https://doi.org/10.1039/d5dd00573f",
             "https://github.com/Academich/faster-ml-casp/blob/main/configs/medusa_default_config.yml",
-            'finder.expansion_policy.select("transformer")',
-            "sampling: medusa",
-            "time_limit",
-            "iteration_limit",
-            "not guaranteed gains",
+            "M-SBS",
+            "RDKit MCP-style chemistry tools",
+            "not measured per-feature time savings",
             "Runtime > Change runtime type",
             "T4 GPU",
         ):
@@ -262,13 +260,13 @@ class NotebookStructureAndGuardrailTests(unittest.TestCase):
         self.assertEqual(NB_DATA["nbformat"], 4)
         self.assertEqual(len(CELLS), 8)
         expected_titles = {
-            1: "# @title 1. Install Dependencies & Download Medusa + Stock Models",
-            2: "# @title 2. Core Definitions: SMARTS Library, Reaction Classifiers & Gemini Helpers",
-            3: "# @title 3. Initialize AiZynthFinder Engine",
-            4: "# @title 4. Interactive Target Molecule Sketcher (JSME) + Multi-Identifier Resolver",
-            5: "# @title 5. Configure Search & Route Ranking Settings",
-            6: "# @title 5B. Launch Retrosynthesis Search",
-            7: "# @title Chat with Gemini about the retrosynthesis routes",
+            1: "# @title 1. Set Up GPU Planner: Install Packages, Medusa Checkpoint & Building-Block Stocks",
+            2: "# @title 2. RDKit SMARTS Classifiers, Chemistry Tools & Gemini Client",
+            3: "# @title 3. Initialize Medusa + Retro* Planner and ZINC/Custom Lab Stock",
+            4: "# @title 4. Sketch or Resolve Target, Lock Atoms & Load Lab Stock",
+            5: "# @title 5. Configure Medusa Search, RDKit/Gemini Classification, Pareto Ranking & ELN",
+            6: "# @title 5B. Run Retro* Search and Display Ranked Routes & ELN Draft",
+            7: "# @title 6. Gemini Chat: RDKit Chemistry Tools, Route Edits, ELN & Grounded Literature",
         }
         for idx, title in expected_titles.items():
             self.assertEqual(CELLS[idx]["cell_type"], "code")
