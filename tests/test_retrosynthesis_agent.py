@@ -422,8 +422,9 @@ class StepConditionsAndElnTests(unittest.TestCase):
         self.ns["_generate_strategy_header"] = lambda _: {}
         self.ns["get_process_ram_mb"] = lambda: 10
         self.ns["mol_or_rxn_to_svg_html"] = lambda *a, **k: "<svg></svg>"
+        draft = "Analog's <em>draft</em> & note A|B.\n\"Confirm result.\""
         step = dict(self.ns["rdkit_classify_step"](smi), step_index=1, safety_green_score=9,
-                    experimental_procedure="Analog's <em>draft</em>")
+                    experimental_procedure=draft)
         route = {"steps": [step], "step_count": 1,
                  "starting_materials": {"precursors": [], "in_stock_count": 1, "total_leaves": 1}}
         res = {"target_smiles": "Nc1ccccc1", "target_scale_grams": 1.0, "routes": [route]}
@@ -444,8 +445,29 @@ class StepConditionsAndElnTests(unittest.TestCase):
 
         parser = CopyButtonParser()
         parser.feed(result)
+        self.assertIn("Role\tName / SMILES\tMW (g/mol)", parser.payload)
         self.assertIn("Limiting Reactant", parser.payload)
-        self.assertIn("Analog's &lt;em&gt;draft&lt;/em&gt;", parser.payload)
+        self.assertIn("Draft procedure: " + draft, parser.payload)
+        self.ns["LATEST_RETRO_RESULTS"] = res
+        markdown = self.ns["generate_eln_markdown"](1, 1.0)
+        self.assertIn("Analog's &lt;em&gt;draft&lt;/em&gt; &amp; note A&#124;B.", markdown)
+
+    def test_chat_inspection_links_only_crossref_verified_ord_dois(self):
+        smi = "CC=O>>CCO"
+        report = {"smarts_matched_count": 2, "top_precedents": [
+            {"ord_id": "ord-a", "doi": "10.1234/confirmed"},
+            {"ord_id": "ord-b", "doi": "10.1234/unverified"},
+        ]}
+        verify = Mock(side_effect=[{"doi": "10.1234/confirmed"}, None])
+        self.ns.update(ORD_VALIDATOR=SimpleNamespace(batch_prefetch_online_ord=Mock(), validate_step=lambda _: report),
+                       _verify_doi_metadata=verify, tool_artifacts_html=[])
+        node = next(n for n in ast.walk(TREE) if isinstance(n, ast.FunctionDef) and n.name == "inspect_reaction_step_details")
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(NOTEBOOK), "exec"), self.ns)
+        result = json.loads(self.ns["inspect_reaction_step_details"](smi))
+        rendered = self.ns["tool_artifacts_html"][0]
+        self.assertEqual(result["verified_literature"], [{"doi": "10.1234/confirmed"}])
+        self.assertIn("https://doi.org/10.1234/confirmed", rendered)
+        self.assertNotIn("10.1234/unverified", rendered)
 
 
 if __name__ == "__main__":
