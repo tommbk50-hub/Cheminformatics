@@ -48,7 +48,7 @@ QUINOLINE = "Nc1ccccc1.CC(=O)CC=O>>Cc1ccnc2ccccc12"
 def load_cell_two():
     """Load definitions, not Colab, the model, DuckDB globals, or UI setup."""
     data_names = {
-        "_SMARTSRX_URL", "_STEP_USPTO_TEMPLATE_REGISTRY", "_COMPETING_ELECTROPHILES",
+        "_SMARTSRX_URL", "_STEP_USPTO_TEMPLATE_REGISTRY", "_STEP_TEMPLATE_FIELDS", "_COMPETING_ELECTROPHILES",
         "ORD_DB_PATH", "_USPTO_FG_SOURCE", "_ELN_COLUMNS",
     }
     body = [
@@ -127,6 +127,33 @@ class ReactionGateTests(unittest.TestCase):
         self.assertEqual([t["base_sim"] for t in tiers], [0.82, 0.68, 0.58])
         self.assertEqual(tiers[0]["smarts"], "[C:1]Br.[N:2]>>[C:1][N:2]")
 
+    def test_nodes_with_identical_smiles_keep_their_own_templates(self):
+        smi = "CC=O>>CCO"
+        mapped = "[CH3:1][CH2:2][OH:3]>>[CH3:1][CH:2]=[O:3]"
+        retro_a = "[CH2:2][OH:3]>>[CH:2]=[O:3]"
+        retro_b = "[C:1][CH2:2][OH:3]>>[C:1][CH:2]=[O:3]"
+        nodes = [
+            SimpleNamespace(metadata={"template": retro_a, "classification": "Carbonyl reduction",
+                                      "mapped_reaction_smiles": mapped}, reaction_smiles=lambda: "CCO>>CC=O"),
+            SimpleNamespace(metadata={"template_code": 0, "retro_template": float("nan")},
+                            reaction_smiles=lambda: "CCO>>CC=O"),
+        ]
+        trees = [SimpleNamespace(reactions=lambda node=node: iter([node]), child_reactions=lambda node: []) for node in nodes]
+        policy = SimpleNamespace(template_column="custom_smarts",
+                                 templates=pd.DataFrame([{"classification": "Aldehyde reduction", "custom_smarts": retro_b}]))
+        finder = SimpleNamespace(routes=[{"reaction_tree": tree} for tree in trees], expansion_policy={"uspto": policy})
+        node_templates = {}
+        self.assertEqual(self.ns["_harvest_uspto_templates_from_finder"](finder, node_templates), [smi])
+        steps = [self.ns["_flatten_reaction_tree"](tree, node_templates)[0] for tree in trees]
+        self.assertEqual([step["retro_template"] for step in steps], [retro_a, retro_b])
+        self.assertEqual(steps[0]["mapped_forward_smiles"], self.ns["_reverse_reaction"](mapped))
+        self.insert("ord-reduction", smi)
+        self.ns["ORD_VALIDATOR"] = self.validator
+        lookup = self.ns["_classify_route_steps"](steps, use_gemini=False)
+        results = [lookup[self.ns["_route_step_key"](step)] for step in steps]
+        self.assertEqual([result["reaction_name"] for result in results], ["Carbonyl reduction", "Aldehyde reduction"])
+        self.assertTrue(all(result["ord_validation"]["matched_smarts_label"].startswith("Tier 1:") for result in results))
+
     def insert(self, ord_id, rxn, query=None, yield_pct=75):
         product = self.ns["_parse_reaction_mols"](query or rxn)[1][0]
         with duckdb.connect(self.validator.db_path) as con:
@@ -172,6 +199,31 @@ class ReactionGateTests(unittest.TestCase):
         self.assertIn("fr_anhydride", delta[0])
         self.assertIsNone(gate(r, p, delta, tiers, self.ns["compute_rdkit_internal_delta_fg"](SNAR)))
         self.assertIsNotNone(gate(r, p, delta, tiers, delta))
+
+    def test_unchanged_motifs_do_not_make_a_mapped_smarts_match(self):
+        query = "CC=O>>CCO"
+        self.ns["_STEP_USPTO_TEMPLATE_REGISTRY"][query] = {"retro_template": "[CH2:1][OH:2]>>[CH:1]=[O:2]"}
+        self.insert("ord-debromination", "O=Cc1ccc(CO)cc1Br>>O=Cc1ccc(CO)cc1", query=query, yield_pct=99)
+        self.insert("ord-reduction", "O=CCc1ccccc1>>OCCc1ccccc1")
+        report = self.validator.validate_step(query)
+        self.assertEqual([p["ord_id"] for p in report["top_precedents"]], ["ord-reduction"])
+        self.assertIn("Tier 1", report["matched_smarts_label"])
+
+    def test_filtered_shard_can_be_rescanned_for_a_new_gate(self):
+        target = "CC=O>>CCO"
+        dataset = SimpleNamespace(reactions=[target])
+        download = Mock(return_value="/tmp/ord-fixture.parquet")
+        self.ns.update(_HAS_HF_HUB=True, _HAS_ORD_SCHEMA=True, hf_hub_download=download,
+                       list_repo_files=lambda **kwargs: ["fixture.parquet"],
+                       ord_datasets=SimpleNamespace(load_dataset=lambda _: dataset),
+                       parse_ord_reaction_protobuf=lambda smi, admit: (
+                           {"ord_id": "ord-reduction", "rxn_smiles": smi} if admit(smi) else None))
+        sync = self.validator.sync_huggingface_parquet_shards
+        self.assertEqual(sync(forward_smiles_list=[SNAR])["added"], 0)
+        self.assertEqual(sync(forward_smiles_list=[target])["added"], 1)
+        self.assertEqual(sync(forward_smiles_list=[target])["added"], 0)
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(self.validator.validate_step(target)["smarts_matched_count"], 1)
 
     @unittest.skipIf(reaction_pb2 is None, "requires existing ORD schema")
     def test_ord_procedure_and_measured_amounts_round_trip(self):
@@ -222,16 +274,15 @@ class StepConditionsAndElnTests(unittest.TestCase):
         base = self.ns["rdkit_classify_step"](smi)
         self.assertEqual(base["assumed_step_yield"], 0.95)
         item = dict(base, safety_green_score=6, typical_conditions="ignore unsourced conditions",
-                    source_doi_or_patent="ord-from-other-step", assumed_step_yield=0.10)
-        item["ranked_conditions"] = [dict(c, citation_or_ord_id="10.9999/unverified") for c in reversed(base["ranked_conditions"])]
-        item["ranked_conditions"][-1]["citation_or_ord_id"] = "ord-allowed"
+                    source_doi_or_patent="ord-allowed", assumed_step_yield=0.10)
+        item["ranked_conditions"] = list(reversed(base["ranked_conditions"]))
         self.ns["get_gemini_client"] = lambda: object()
         gemini = Mock(return_value=(SimpleNamespace(text=json.dumps({"steps": [item]})), "test", "low"))
         self.ns["call_gemini_with_config"] = gemini
         result = self.ns["batch_classify_with_gemini"]([smi])[smi]
         self.assertEqual(result["safety_green_score"], 5)
         self.assertEqual(result["assumed_step_yield"], 0.95)
-        self.assertEqual(result["source_doi_or_patent"], "")
+        self.assertEqual(result["source_doi_or_patent"], "ord-allowed")
         self.assertEqual([c["rank"] for c in result["ranked_conditions"]], [1, 2, 3])
         self.assertEqual([c["citation_or_ord_id"] for c in result["ranked_conditions"]],
                          ["ord-allowed", "USPTO/ΔFG Standard", "USPTO/ΔFG Standard"])
@@ -242,6 +293,23 @@ class StepConditionsAndElnTests(unittest.TestCase):
         product = next(row for row in evidence["predicted_ipc_masses"] if row["role"] == "Product")
         self.assertAlmostEqual(product["[M+H]+ m/z"], 47.0491, places=4)
         self.assertNotEqual(self.ns["batch_classify_with_gemini"]([smi], use_gemini=False)[smi]["safety_green_score"], 5)
+
+    def test_unverified_citation_rejects_the_claims_not_just_the_identifier(self):
+        smi = "CC=O>>CCO"
+        report = {"smarts_matched_count": 1, "top_precedents": [{"ord_id": "ord-good", "procedure_details": "ORD text"}]}
+        self.ns["ORD_VALIDATOR"] = SimpleNamespace(validate_step=lambda _: report, index_revision=1)
+        self.ns["get_gemini_client"] = lambda: object()
+        baseline = self.ns["rdkit_classify_step"](smi)
+        proposed = dict(baseline, source_doi_or_patent="ord-unrelated", experimental_procedure="Unverified draft")
+        claim = dict(baseline["ranked_conditions"][0], citation_or_ord_id="ord-unrelated", expected_yield_range="99% reported")
+        proposed["ranked_conditions"] = [claim, *baseline["ranked_conditions"][1:]]
+        response = SimpleNamespace(text=json.dumps({"steps": [proposed]}))
+        self.ns["call_gemini_with_config"] = Mock(return_value=(response, "test", "low"))
+        result = self.ns["batch_classify_with_gemini"]([smi])[smi]
+        self.assertFalse(result["gemini_enriched"])
+        self.assertEqual(result["source_doi_or_patent"], "")
+        self.assertEqual(result["experimental_procedure"], "")
+        self.assertEqual(result["ranked_conditions"][0], baseline["ranked_conditions"][0])
 
     def test_literature_cross_checks_doi_and_queries_real_terms(self):
         pubchem = Mock()
@@ -297,6 +365,39 @@ class StepConditionsAndElnTests(unittest.TestCase):
                           "0.05 (5 mol%)", "53.21", "50.000", "8.000"):
                 self.assertIn(value, output)
             self.assertNotIn("18.750", output)
+
+    def test_limiting_substitution_preserves_recorded_partner_ratio(self):
+        ingredients = [
+            ingredient("Methanol", "Reactant", "CO", 1),
+            ingredient("Acetic acid", "Reactant", "CC(=O)O", 2),
+            ingredient("Water", "Solvent", "O", molarity=0.1),
+        ]
+        rows = self.ns["_merge_step_stoichiometry"]("CC(=O)O.CCO>>CCOC(C)=O", ingredients)
+        self.assertEqual([(r["smiles_or_formula"], r["equivalents"]) for r in rows[:2]], [("CCO", 1), ("CC(=O)O", 2)])
+        self.assertEqual(rows[2]["molarity_m"], 0.1)
+
+    def test_scaled_eln_retains_two_producers_of_the_same_intermediate(self):
+        target = "CCOC(=O)CC=O"
+        reactions = [
+            ("CC=O>>CCO", 0.50, []),
+            ("CCBr>>CCO", 0.80, []),
+            ("CCO.O=CCl>>CCOC=O", 0.80, [1]),
+            ("CCO.CC(=O)Cl>>CCOC(C)=O", 0.80, [2]),
+            (f"CCOC=O.CCOC(C)=O>>{target}", 0.80, [3, 4]),
+        ]
+        steps = [dict(step_index=i, forward_smiles=smi, assumed_step_yield=y, precursor_steps=parents)
+                 for i, (smi, y, parents) in enumerate(reactions, 1)]
+        scale_g = 8 * Descriptors.MolWt(Chem.MolFromSmiles(target)) / 1000
+        route = {"steps": steps}
+        plans = self.ns["_scale_route_eln"](route, target, scale_g)
+        charges = {p["step"]["step_index"]: p["limiting_mmol"] for p in plans}
+        self.assertEqual(len(charges), 5)
+        self.assertAlmostEqual(charges[1], 25)
+        self.assertAlmostEqual(charges[2], 15.625)
+        self.ns["LATEST_RETRO_RESULTS"] = {"target_smiles": target, "routes": [route]}
+        overridden = self.ns["generate_eln_markdown"](1, scale_g, assumed_step_yield=0.5, step_filter=5)
+        self.assertIn("50% assumed yield", overridden)
+        self.assertIn("16.000", overridden)
 
     def test_zero_hit_panel_does_not_render_old_fingerprint_hits(self):
         render = self.ns["_render_ord_step_panel_html"]
