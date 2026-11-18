@@ -3,6 +3,7 @@ from collections import Counter, defaultdict
 import functools
 import gc
 import html
+from html.parser import HTMLParser
 import json
 import logging
 import math
@@ -296,6 +297,54 @@ class StepConditionsAndElnTests(unittest.TestCase):
                           "0.05 (5 mol%)", "53.21", "50.000", "8.000"):
                 self.assertIn(value, output)
             self.assertNotIn("18.750", output)
+
+    def test_zero_hit_panel_does_not_render_old_fingerprint_hits(self):
+        render = self.ns["_render_ord_step_panel_html"]
+        report = {"smarts_matched_count": 0, "top_precedents": [{"ord_id": "ord-stale"}],
+                  "rdkit_delta_fg_signature": {"consumed_fgs": ["fr_sulfone"], "formed_fgs": ["fr_aniline"]}}
+        panel = render(report)
+        self.assertIn("0 ORD reactions in current shard matched this Reaction SMARTS / ΔFG gate", panel)
+        self.assertIn("RDKit ΔFG Signature: fr_sulfone → fr_aniline", panel)
+        self.assertNotIn("ord-stale", panel)
+        del report["smarts_matched_count"]
+        self.assertIn("Reclassify it to verify precedents", render(report))
+        self.assertNotIn("ord-stale", render(report))
+
+    def test_step_card_has_ranked_conditions_verbatim_evidence_analytics_and_copy(self):
+        smi = "Brc1ccccc1.N>>Nc1ccccc1"
+        report = {
+            "smarts_matched_count": 1, "matched_smarts_label": "Tier 1: Exact USPTO Template SMARTS",
+            "top_precedents": [{"ord_id": "ord-allowed", "procedure_details": "  Author's <b>literal note</b>\nNext line.",
+                                "doi": "10.1234/unverified", "yield_pct": 72.0}],
+        }
+        self.ns["ORD_VALIDATOR"] = SimpleNamespace(validate_step=lambda _: report, get_index_size=lambda: 1)
+        self.ns["_generate_strategy_header"] = lambda _: {}
+        self.ns["get_process_ram_mb"] = lambda: 10
+        self.ns["mol_or_rxn_to_svg_html"] = lambda *a, **k: "<svg></svg>"
+        step = dict(self.ns["rdkit_classify_step"](smi), step_index=1, safety_green_score=9,
+                    experimental_procedure="Analog's <em>draft</em>")
+        route = {"steps": [step], "step_count": 1,
+                 "starting_materials": {"precursors": [], "in_stock_count": 1, "total_leaves": 1}}
+        res = {"target_smiles": "Nc1ccccc1", "target_scale_grams": 1.0, "routes": [route]}
+        result = self.ns["_render_routes_html_from_results"](res)
+        for expected in ("Safety:</b> 5/5", "SMARTS-Verified ORD Hits: 1", "Rank #1", "Rank #2", "Rank #3",
+                         "LC-MS &amp; Workup", "hydrodehalogenation impurity", "94.0651", "ΔTPSA", "Expected Product",
+                         "Copy Step ELN to Clipboard", "Author&#x27;s &lt;b&gt;literal note&lt;/b&gt;\nNext line."):
+            self.assertIn(expected, result)
+        self.assertNotIn("10.1234/unverified", result)
+
+        class CopyButtonParser(HTMLParser):
+            payload = None
+
+            def handle_starttag(self, tag, attrs):
+                attributes = dict(attrs)
+                if tag == "button" and "data-eln" in attributes:
+                    self.payload = attributes["data-eln"]
+
+        parser = CopyButtonParser()
+        parser.feed(result)
+        self.assertIn("Limiting Reactant", parser.payload)
+        self.assertIn("Analog's &lt;em&gt;draft&lt;/em&gt;", parser.payload)
 
 
 if __name__ == "__main__":
